@@ -2,9 +2,24 @@
 if (session_status() === PHP_SESSION_NONE) session_start();
 require __DIR__ . '/db.php';
 
+// --- Helpers ---
 function h($s)
 {
   return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+}
+function q($sql, $params = [])
+{
+  global $pdo;
+  $st = $pdo->prepare($sql);
+  $st->execute($params);
+  return $st->fetchAll(PDO::FETCH_ASSOC);
+}
+function q1($sql, $params = [])
+{
+  global $pdo;
+  $st = $pdo->prepare($sql);
+  $st->execute($params);
+  return $st->fetch(PDO::FETCH_ASSOC);
 }
 
 /* ต้องล็อกอิน */
@@ -18,7 +33,7 @@ $user = $_SESSION['user'];
 if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(16));
 $CSRF = $_SESSION['csrf'];
 
-/* cart helpers - แยกตะกร้าต่อ user */
+/* cart helpers */
 function get_user_cart(): array
 {
   $uid = (int)($_SESSION['user']['id'] ?? 0);
@@ -30,24 +45,24 @@ function set_user_cart(array $cart): void
   $_SESSION['carts'][$uid] = $cart;
 }
 
-/* โหลดสินค้าในตะกร้า + ดึง seller ด้วย */
+/* โหลดสินค้าในตะกร้า */
 $cart   = get_user_cart();
 $total  = 0.0;
-$groups = []; // seller_id => ['seller_name'=>..., 'items'=>[], 'subtotal'=>...]
+$groups = []; // seller_id => [...]
 
 if ($cart && is_array($cart)) {
   $ids = array_values(array_filter(array_map('intval', array_keys($cart)), fn($v) => $v > 0));
   if ($ids) {
     $ph = implode(',', array_fill(0, count($ids), '?'));
-    $sql = "SELECT p.id, p.name, p.price, p.image1, p.seller_id, u.name AS seller_name, u.email AS seller_email
-            FROM products p
-            LEFT JOIN users u ON u.id = p.seller_id
-            WHERE p.id IN ($ph)";
-    $st = $pdo->prepare($sql);
-    $st->execute($ids);
-    $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+    $rows = q(
+      "SELECT p.id, p.name, p.price, p.image1, p.seller_id, u.name AS seller_name, u.email AS seller_email
+             FROM products p LEFT JOIN users u ON u.id = p.seller_id WHERE p.id IN ($ph)",
+      $ids
+    );
 
-    $valid = [];
+    $current_cart_ids = array_keys($cart);
+    $valid_ids = [];
+
     foreach ($rows as $p) {
       $pid = (int)$p['id'];
       $qty = (int)($cart[$pid] ?? 0);
@@ -56,65 +71,79 @@ if ($cart && is_array($cart)) {
       $price    = (float)$p['price'];
       $subtotal = $qty * $price;
       $total   += $subtotal;
-
-      $sellerId   = (int)($p['seller_id'] ?? 0);
+      $sellerId = (int)($p['seller_id'] ?? 0);
       $sellerName = $p['seller_name'] ?: ($p['seller_email'] ?: 'ไม่ระบุผู้ขาย');
 
       if (!isset($groups[$sellerId])) {
-        $groups[$sellerId] = [
-          'seller_name' => $sellerName,
-          'items'       => [],
-          'subtotal'    => 0.0,
-        ];
+        $groups[$sellerId] = ['seller_name' => $sellerName, 'items' => [], 'subtotal' => 0.0];
       }
 
-      $groups[$sellerId]['items'][] = [
-        'id'       => $pid,
-        'name'     => $p['name'],
-        'price'    => $price,
-        'image1'   => $p['image1'],
-        'qty'      => $qty,
-        'subtotal' => $subtotal,
-      ];
+      $groups[$sellerId]['items'][] = ['id' => $pid, 'name' => $p['name'], 'price' => $price, 'image1' => $p['image1'], 'qty' => $qty, 'subtotal' => $subtotal];
       $groups[$sellerId]['subtotal'] += $subtotal;
-      $valid[] = $pid;
+      $valid_ids[] = $pid;
     }
 
-    // ล้าง id ผี
-    $changed = false;
-    foreach ($cart as $pid => $qty) {
-      if (!in_array((int)$pid, $valid, true)) {
-        unset($cart[$pid]);
-        $changed = true;
-      }
+    $invalid_ids = array_diff($current_cart_ids, $valid_ids);
+    if (!empty($invalid_ids)) {
+      foreach ($invalid_ids as $id) unset($cart[(int)$id]);
+      set_user_cart($cart);
     }
-    if ($changed) set_user_cart($cart);
   }
 }
+
+// --- [โค้ด NAVBAR] ---
+$userNav = $_SESSION['user'] ?? null;
+$uidNav  = $userNav['id'] ?? null;
+$roleNav = $userNav['role'] ?? null;
+$cartCountNav = 0;
+if ($uidNav) {
+  $userCartNav = @$_SESSION['carts'][$uidNav] ?? [];
+  $cartCountNav = is_array($userCartNav) ? array_sum($userCartNav) : 0;
+}
+// --- [จบโค้ด NAVBAR] ---
 ?>
 <!doctype html>
-<html lang="th" data-bs-theme="dark">
+<html lang="th" data-bs-theme="light">
 
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ตะกร้าสินค้า - Web Shop Game</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
+    /* --- [อัปเดต] ธีมเขียว-ขาว --- */
     :root {
-      --bg: #0b0f14;
-      --card: #0f172a;
-      --line: rgba(148, 163, 184, .18);
+      --bg: #f7fefa;
+      --card: #ffffff;
+      --border: #e6e6e6;
+      --text: #1a202c;
+      --brand: #22c55e;
+      --brand-dark: #16a34a;
     }
 
     body {
       background: var(--bg);
-      color: #e5e7eb;
+      color: var(--text);
+      /* เปลี่ยนสีตัวอักษรหลัก */
+      font-family: 'Sora', sans-serif;
+    }
+
+    .navbar {
+      background: rgba(255, 255, 255, .85);
+      /* เปลี่ยนเป็นพื้นหลังสว่าง */
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      /* ใช้เส้นขอบสีอ่อน */
+      font-family: 'Sora', sans-serif;
     }
 
     .card {
       background: var(--card);
-      border: 1px solid var(--line);
+      border: 1px solid var(--border);
       border-radius: 16px;
     }
 
@@ -123,7 +152,7 @@ if ($cart && is_array($cart)) {
       height: 70px;
       object-fit: cover;
       border-radius: 10px;
-      border: 1px solid var(--line);
+      border: 1px solid var(--border);
     }
 
     .chip {
@@ -131,12 +160,12 @@ if ($cart && is_array($cart)) {
       align-items: center;
       gap: .5rem;
       padding: .35rem .7rem;
-      border: 1px solid var(--line);
+      border: 1px solid var(--border);
       border-radius: 999px;
     }
 
     .qty-btn {
-      width: 34px
+      width: 34px;
     }
 
     .seller-head {
@@ -144,7 +173,11 @@ if ($cart && is_array($cart)) {
       justify-content: space-between;
       align-items: center;
       padding: .9rem 1rem;
-      border-bottom: 1px solid var(--line);
+      border-bottom: 1px solid var(--border);
+      background-color: #f8f9fa;
+      /* เพิ่มสีพื้นหลังหัวการ์ด */
+      border-top-left-radius: 16px;
+      border-top-right-radius: 16px;
     }
 
     .seller-name {
@@ -152,10 +185,11 @@ if ($cart && is_array($cart)) {
     }
 
     .seller-sub {
-      color: #a1a1aa;
+      color: #6c757d;
       font-size: .95rem;
     }
 
+    /* ปรับสีตัวอักษรรอง */
     .totals-sticky {
       position: sticky;
       bottom: 1rem;
@@ -165,32 +199,102 @@ if ($cart && is_array($cart)) {
     }
 
     .summary-box {
-      background: #0d1324;
-      border: 1px solid var(--line);
+      background: var(--card);
+      /* เปลี่ยนพื้นหลัง */
+      border: 1px solid var(--border);
       border-radius: 14px;
       padding: 1rem;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .05);
+      /* เพิ่มเงา */
     }
 
-    .btn-outline-light {
-      border-color: var(--line);
+    .btn-brand {
+      background: var(--brand);
+      border-color: var(--brand);
+      color: #fff;
+      font-weight: 700;
+      border-radius: 12px;
+    }
+
+    .btn-brand:hover {
+      background: var(--brand-dark);
+      border-color: var(--brand-dark);
     }
   </style>
 </head>
 
 <body>
+
+  <nav class="navbar navbar-expand-lg sticky-top">
+    <div class="container">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="index.php">
+        <div style="width: 28px; height: 28px; border-radius: 50%; background: var(--brand);"></div>
+        <strong class="fw-bolder">Web Shop Game</strong>
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMain">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="navMain">
+        <ul class="navbar-nav ms-auto align-items-lg-center gap-2 gap-lg-3">
+          <li class="nav-item"><a href="shop.php" class="nav-link fw-semibold">ร้านค้า</a></li>
+          <li class="nav-item">
+            <a href="cart.php" class="btn btn-outline-secondary btn-sm position-relative">
+              <i class="bi bi-cart3 fs-5"></i>
+              <?php if ($cartCountNav > 0): ?>
+                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"><?= $cartCountNav ?></span>
+              <?php endif; ?>
+            </a>
+          </li>
+          <?php if ($uidNav): ?>
+            <li class="nav-item dropdown">
+              <a class="nav-link dropdown-toggle d-flex align-items-center gap-2" href="#" role="button" data-bs-toggle="dropdown">
+                <div class="avatar d-flex align-items-center justify-content-center" style="width:36px; height:36px; background-color:var(--brand); color:#fff; border-radius:50%; font-weight:700;">
+                  <?= strtoupper(substr($userNav['name'] ?? $userNav['email'], 0, 1)) ?>
+                </div>
+                <span class="d-none d-sm-inline fw-semibold"><?= h($userNav['name'] ?? $userNav['email']) ?></span>
+              </a>
+              <ul class="dropdown-menu dropdown-menu-end shadow border-0" style="border-radius: 1rem;">
+                <?php if ($roleNav === 'admin'): ?>
+                  <li><a class="dropdown-item" href="admin_dashboard.php"><i class="bi bi-person-gear me-2"></i>หลังบ้าน (Admin)</a></li>
+                  <li>
+                    <hr class="dropdown-divider">
+                  </li>
+                <?php endif; ?>
+                <?php if ($roleNav === 'seller'): ?>
+                  <li><a class="dropdown-item" href="manage_products.php"><i class="bi bi-box-seam me-2"></i>จัดการสินค้า</a></li>
+                  <li><a class="dropdown-item" href="seller_orders.php"><i class="bi bi-receipt-cutoff me-2"></i>ออเดอร์ร้านฉัน</a></li>
+                <?php else: ?>
+                  <li><a class="dropdown-item" href="register_seller.php"><i class="bi bi-patch-check me-2"></i>สมัครเป็นผู้ขาย</a></li>
+                <?php endif; ?>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li><a class="dropdown-item" href="profile.php"><i class="bi bi-person me-2"></i>โปรไฟล์</a></li>
+                <li><a class="dropdown-item" href="order_list.php"><i class="bi bi-card-checklist me-2"></i>คำสั่งซื้อของฉัน</a></li>
+                <li>
+                  <hr class="dropdown-divider">
+                </li>
+                <li><a class="dropdown-item text-danger" href="logout.php"><i class="bi bi-box-arrow-right me-2"></i>ออกจากระบบ</a></li>
+              </ul>
+            </li>
+          <?php else: ?>
+            <li class="nav-item"><a href="login.php" class="btn btn-brand">เข้าสู่ระบบ</a></li>
+          <?php endif; ?>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
   <div class="container py-4">
     <div class="d-flex justify-content-between align-items-center mb-3">
-      <h3 class="mb-0"><i class="bi bi-cart3 me-2"></i>ตะกร้าสินค้า</h3>
-      <span class="chip"><i class="bi bi-person-circle"></i><span><?= h($user['name'] ?? $user['email']) ?></span></span>
+      <h3 class="mb-0 fw-bold"><i class="bi bi-cart3 me-2"></i>ตะกร้าสินค้า</h3>
     </div>
 
     <?php if (empty($groups)): ?>
       <div class="card p-4 text-center mb-3">
         <div class="fs-5 text-secondary">ตะกร้าว่างเปล่า</div>
       </div>
-      <a href="shop.php" class="btn btn-success"><i class="bi bi-shop"></i> เลือกซื้อสินค้า</a>
-    <?php else: ?>
-
+      <a href="shop.php" class="btn btn-brand"><i class="bi bi-shop"></i> เลือกซื้อสินค้า</a> <?php else: ?>
       <?php foreach ($groups as $sellerId => $g): ?>
         <div class="card mb-3" data-seller="<?= (int)$sellerId ?>">
           <div class="seller-head">
@@ -199,10 +303,9 @@ if ($cart && is_array($cart)) {
               รวมร้านนี้: <span class="text-success fw-semibold seller-subtotal">฿<?= number_format($g['subtotal'], 2) ?></span>
             </div>
           </div>
-
           <div class="table-responsive">
-            <table class="table table-dark align-middle mb-0">
-              <thead class="table-borderless">
+            <table class="table align-middle mb-0">
+              <thead class="table-borderless" style="background-color: var(--bg);">
                 <tr>
                   <th>สินค้า</th>
                   <th class="text-end">ราคา</th>
@@ -221,9 +324,9 @@ if ($cart && is_array($cart)) {
                     <td class="text-end">฿<?= number_format($it['price'], 2) ?></td>
                     <td class="text-center">
                       <div class="btn-group btn-group-sm" role="group">
-                        <button class="btn btn-outline-light qty-btn btn-decrease">–</button>
-                        <input class="form-control form-control-sm text-center bg-dark text-light" style="width:70px" value="<?= (int)$it['qty'] ?>" readonly>
-                        <button class="btn btn-outline-light qty-btn btn-increase">+</button>
+                        <button class="btn btn-outline-secondary qty-btn btn-decrease">–</button>
+                        <input class="form-control form-control-sm text-center" style="width:70px" value="<?= (int)$it['qty'] ?>" readonly>
+                        <button class="btn btn-outline-secondary qty-btn btn-increase">+</button>
                       </div>
                     </td>
                     <td class="text-end subtotal">฿<?= number_format($it['subtotal'], 2) ?></td>
@@ -247,12 +350,10 @@ if ($cart && is_array($cart)) {
             <span id="cartTotal" class="text-success fw-bold">฿<?= number_format($total, 2) ?></span>
           </div>
           <div class="d-flex gap-2">
-            <a href="shop.php" class="btn btn-outline-light"><i class="bi bi-shop"></i> เลือกซื้อสินค้าต่อ</a>
+            <a href="shop.php" class="btn btn-outline-secondary"><i class="bi bi-shop"></i> เลือกซื้อสินค้าต่อ</a>
             <form action="create_order.php" method="post">
               <input type="hidden" name="csrf" value="<?= h($CSRF) ?>">
-              <!-- หมายเหตุ: create_order.php ควร “แยกออเดอร์ตาม seller_id” โดยอ่านจากตะกร้านี้ -->
-              <button type="submit" class="btn btn-success">
-                <i class="bi bi-bag-check"></i> สั่งซื้อทั้งหมด (แยกตามร้าน)
+              <button type="submit" class="btn btn-brand"> <i class="bi bi-bag-check"></i> สั่งซื้อทั้งหมด (แยกตามร้าน)
               </button>
             </form>
           </div>
@@ -263,6 +364,7 @@ if ($cart && is_array($cart)) {
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
+    // Javascript ไม่ต้องแก้ เพราะทำงานกับ DOM โดยไม่สนสี
     async function updateCart(id, action, qty = 1) {
       const fd = new FormData();
       fd.append('id', id);
@@ -276,13 +378,11 @@ if ($cart && is_array($cart)) {
       const data = await res.json().catch(() => null);
       if (!data || !data.success) return;
 
-      // อัปเดตรายการที่เปลี่ยน
       const row = document.querySelector(`tr[data-id="${id}"]`);
       if (action === 'remove' || !data.cart[id]) {
         if (row) {
           const sellerCard = row.closest('.card');
           row.remove();
-          // ถ้าร้านนี้ไม่มีสินค้าแล้ว ลบการ์ดร้าน
           if (sellerCard && sellerCard.querySelectorAll('tbody tr').length === 0) {
             sellerCard.remove();
           }
@@ -294,7 +394,6 @@ if ($cart && is_array($cart)) {
         });
       }
 
-      // อัปเดตรวมร้าน (per seller)
       if (data.seller_totals) {
         Object.entries(data.seller_totals).forEach(([sellerId, val]) => {
           const card = document.querySelector(`.card[data-seller="${sellerId}"]`);
@@ -303,7 +402,6 @@ if ($cart && is_array($cart)) {
             if (el) el.innerText = '฿' + Number(val).toLocaleString(undefined, {
               minimumFractionDigits: 2
             });
-            // ถ้ารวมร้านกลายเป็น 0 และไม่มีแถว -> ลบการ์ดได้ (เผื่อกรณี remove ทั้งร้านด้วยการแก้ qty)
             if (Number(val) <= 0 && card.querySelectorAll('tbody tr').length === 0) {
               card.remove();
             }
@@ -311,17 +409,25 @@ if ($cart && is_array($cart)) {
         });
       }
 
-      // อัปเดตรวมทั้งหมด
       const totalEl = document.getElementById('cartTotal');
       if (totalEl) totalEl.innerText = '฿' + Number(data.total).toLocaleString(undefined, {
         minimumFractionDigits: 2
       });
 
-      // ถ้าตะกร้ากลายเป็นว่าง รีเฟรชเพื่อแสดง empty state
+      // อัปเดต cart count บน Navbar
+      const navCartBadge = document.querySelector('.navbar .badge');
+      if (navCartBadge) {
+        if (data.total_items > 0) {
+          navCartBadge.innerText = data.total_items;
+          navCartBadge.style.display = '';
+        } else {
+          navCartBadge.style.display = 'none';
+        }
+      }
+
       if (!data.cart || Object.keys(data.cart).length === 0) location.reload();
     }
 
-    // bind ปุ่มทุกแถว
     document.querySelectorAll('tbody tr').forEach(tr => {
       const id = tr.dataset.id;
       tr.querySelector('.btn-increase').onclick = () => updateCart(id, 'increase');
